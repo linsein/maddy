@@ -36,11 +36,12 @@ import (
 func TestSMTPSASLExternalTLS(tt *testing.T) {
 	tt.Parallel()
 	t := tests.NewT(tt)
+	t.AllowFDSharing()
 
 	smtpPort := t.Port("smtp")
 	t.DNS(nil)
 	t.Config(`
-		smtp tls://127.0.0.1:{env:TEST_PORT_smtp} {
+		smtp {env:TEST_TLS_ENDPOINT_smtp} {
 			hostname mx.maddy.test
 			tls {
 				loader file {env:TEST_PWD}/testdata/tls/server.crt {env:TEST_PWD}/testdata/tls/server.key

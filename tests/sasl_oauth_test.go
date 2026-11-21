@@ -35,11 +35,12 @@ func TestSMTPOAuthSASL(tt *testing.T) {
 	tt.Cleanup(srv.Close)
 
 	t := tests.NewT(tt)
+	t.AllowFDSharing()
 	t.DNS(nil)
 	smtpPort := t.Port("smtp")
 	t.Config(`
 
-smtp tcp://127.0.0.1:{env:TEST_PORT_smtp} {
+smtp {env:TEST_ENDPOINT_smtp} {
 	tls off
 	insecure_auth
 	hostname mx.maddy.test

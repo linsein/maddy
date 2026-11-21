@@ -79,7 +79,7 @@ func TestAuth_AuthPlain(t *testing.T) {
 	check("postmaster@other.org", "password", true)
 
 	for _, username := range []string{"postmaster@example.or", "POSTMASTER@EXAMPLE.OR"} {
-		err := a.AuthPlain(username, "secret-password")
+		err := a.AuthPlain(&module.AuthContext{}, username, "secret-password")
 		if !errors.Is(err, module.ErrUnknownCredentials) {
 			t.Fatalf("expected unknown credentials, got %v", err)
 		}
@@ -99,7 +99,7 @@ func TestAuth_AuthPlain(t *testing.T) {
 		}
 	}
 
-	err = a.AuthPlain("postmaster@example.org", "wrong-password")
+	err = a.AuthPlain(&module.AuthContext{}, "postmaster@example.org", "wrong-password")
 	if err == nil || exterrors.Fields(err)["reason"] != nil {
 		t.Fatalf("wrong password classified as missing username: %v", err)
 	}
@@ -112,7 +112,7 @@ func TestAuth_AuthPlain(t *testing.T) {
 		table := a.table.(testutils.Table)
 		table.Err = lookupErr
 		a.table = table
-		err := a.AuthPlain(username, "password")
+		err := a.AuthPlain(&module.AuthContext{}, username, "password")
 		if !errors.Is(err, lookupErr) || exterrors.Fields(err)["reason"] != nil {
 			t.Errorf("lookup error for %s = %v, fields: %v", username, err, exterrors.Fields(err))
 		}
@@ -143,7 +143,7 @@ func TestAuth_CreateSASL(t *testing.T) {
 				if withErrorMap {
 					a.ErrorMap = func(err error) error {
 						mapCalls++
-						if err != auth.ErrInvalidAuthCred || len(exterrors.Fields(err)) != 0 {
+						if !errors.Is(err, auth.ErrInvalidAuthCred) || len(exterrors.Fields(err)) != 0 {
 							t.Errorf("ErrorMap received detailed error: %v", err)
 						}
 						return err
@@ -152,7 +152,9 @@ func TestAuth_CreateSASL(t *testing.T) {
 				for _, username := range []string{"POSTMASTER@EXAMPLE.OR", "postmaster@example.org"} {
 					output = ""
 					remote := &net.TCPAddr{IP: net.ParseIP("192.0.2.1"), Port: 12345}
-					srv := a.CreateSASL(mech, remote, func(string, auth.ContextData) error {
+					srv := a.CreateSASL(mech, &auth.SASLContext{
+						RemoteAddr: remote,
+					}, func(string, auth.ContextData) error {
 						t.Fatal("unexpected authentication success")
 						return nil
 					})
@@ -168,7 +170,7 @@ func TestAuth_CreateSASL(t *testing.T) {
 						}
 						_, _, err = srv.Next([]byte("secret-password"))
 					}
-					if err != auth.ErrInvalidAuthCred {
+					if !errors.Is(err, auth.ErrInvalidAuthCred) {
 						t.Fatalf("client error = %v, want generic invalid credentials", err)
 					}
 					_, raw, ok := strings.Cut(output, "\t")
@@ -210,11 +212,11 @@ func TestAuth_CreateSASL(t *testing.T) {
 	lastErr := errors.New("last provider lookup failed")
 	last := &Auth{table: testutils.Table{M: map[string]string{"other": hash}}}
 	a := auth.SASLAuth{Log: &log.NopLogger, Plain: []module.PlainAuth{provider, last}}
-	if err := a.AuthPlain("other", "password"); err != nil {
+	if err := a.AuthPlain(&module.AuthContext{}, "other", "password"); err != nil {
 		t.Fatalf("provider fallback failed: %v", err)
 	}
 	last.table = testutils.Table{Err: lastErr}
-	if err := a.AuthPlain("other", "password"); !errors.Is(err, lastErr) || exterrors.Fields(err)["reason"] != nil {
+	if err := a.AuthPlain(&module.AuthContext{}, "other", "password"); !errors.Is(err, lastErr) || exterrors.Fields(err)["reason"] != nil {
 		t.Fatalf("last provider error lost: %v", err)
 	}
 }

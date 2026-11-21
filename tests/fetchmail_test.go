@@ -31,6 +31,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/foxcpp/maddy/internal/testutils"
 	"github.com/foxcpp/maddy/tests"
 )
 
@@ -102,6 +103,8 @@ func TestFetchmailIMAPDownload(tt *testing.T) {
 		imapConn.ExpectPattern(". OK *")
 	}
 
+	log := testutils.Logger(tt, "fetchmail")
+
 	tempDir := t.TempDir()
 	rcPath := filepath.Join(tempDir, "fetchmailrc")
 	bsmtpPath := filepath.Join(tempDir, "messages.bsmtp")
@@ -123,11 +126,12 @@ func TestFetchmailIMAPDownload(tt *testing.T) {
 		"--nodetach", "--nosyslog", "-v",
 	)
 	cmd.Env = append(os.Environ(), "HOME="+tempDir)
-	output, err := cmd.CombinedOutput()
+	cmd.Stdout = log
+	cmd.Stderr = log
+	err = cmd.Run()
 	if err != nil {
-		t.Fatalf("fetchmail failed: %v\n%s", err, output)
+		t.Fatalf("fetchmail failed: %v", err)
 	}
-	t.Logf("fetchmail output:\n%s", output)
 
 	bsmtp, err := os.ReadFile(bsmtpPath)
 	if err != nil {

@@ -102,7 +102,7 @@ func TestCreateSASLLoginAuthMap(t *testing.T) {
 
 	var gotIdentity string
 	var gotData ContextData
-	srv := a.CreateSASL("LOGIN", &net.TCPAddr{}, func(identity string, data ContextData) error {
+	srv := a.CreateSASL("LOGIN", &SASLContext{}, func(identity string, data ContextData) error {
 		gotIdentity = identity
 		gotData = data
 		return nil
