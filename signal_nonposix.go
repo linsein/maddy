@@ -29,17 +29,22 @@ import (
 	"github.com/foxcpp/maddy/framework/log"
 )
 
-func handleSignals() os.Signal {
+func listenSignals() chan os.Signal {
 	sig := make(chan os.Signal, 5)
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGINT)
+	return sig
+}
+
+func handleSignals(sig os.Signal) (reload bool) {
+	defer signal.Stop(sig)
 
 	s := <-sig
 	go func() {
-		s := handleSignals()
+		handleSignals()
 		log.Printf("forced shutdown due to signal (%v)!", s)
 		os.Exit(1)
 	}()
 
 	log.Printf("signal received (%v)", s)
-	return s
+	return false
 }

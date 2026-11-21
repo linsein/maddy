@@ -23,7 +23,6 @@ package tests_test
 
 import (
 	"net"
-	"strconv"
 	"testing"
 
 	"github.com/foxcpp/go-mockdns"
@@ -32,7 +31,10 @@ import (
 )
 
 func TestMTA_Outbound(tt *testing.T) {
+	tt.Parallel()
+
 	t := tests.NewT(tt)
+	t.AllowFDSharing()
 	t.DNS(map[string]mockdns.Zone{
 		"example.invalid.": {
 			MX: []net.MX{{Host: "mx.example.invalid.", Pref: 10}},
@@ -42,18 +44,19 @@ func TestMTA_Outbound(tt *testing.T) {
 		},
 	})
 	t.Port("smtp")
-	tgtPort := t.Port("remote_smtp")
+
+	be, s := testutils.SMTPServer(tt, "127.0.0.1:0")
+	defer s.Close()
+	t.RemoteSMTPPort(testutils.EffectiveSMTPServerPort(tt, s))
+
 	t.Config(`
 		hostname mx.maddy.test
 		tls off
-		smtp tcp://127.0.0.1:{env:TEST_PORT_smtp} {
+		smtp {env:TEST_ENDPOINT_smtp} {
 			deliver_to remote
 		}`)
 	t.Run(1)
 	defer t.Close()
-
-	be, s := testutils.SMTPServer(tt, "127.0.0.1:"+strconv.Itoa(int(tgtPort)))
-	defer s.Close()
 
 	c := t.Conn("smtp")
 	defer c.Close()
@@ -82,7 +85,10 @@ func TestMTA_Outbound(tt *testing.T) {
 }
 
 func TestIssue321(tt *testing.T) {
+	tt.Parallel()
+
 	t := tests.NewT(tt)
+	t.AllowFDSharing()
 	t.DNS(map[string]mockdns.Zone{
 		"example.invalid.": {
 			AD: true,
@@ -90,11 +96,15 @@ func TestIssue321(tt *testing.T) {
 		},
 	})
 	t.Port("smtp")
-	tgtPort := t.Port("remote_smtp")
+
+	be, s := testutils.SMTPServer(tt, "127.0.0.1:0")
+	defer s.Close()
+	t.RemoteSMTPPort(testutils.EffectiveSMTPServerPort(tt, s))
+
 	t.Config(`
 		hostname mx.maddy.test
 		tls off
-		smtp tcp://127.0.0.1:{env:TEST_PORT_smtp} {
+		smtp {env:TEST_ENDPOINT_smtp} {
 			deliver_to remote {
 				mx_auth {
 					dnssec
@@ -104,9 +114,6 @@ func TestIssue321(tt *testing.T) {
 		}`)
 	t.Run(1)
 	defer t.Close()
-
-	be, s := testutils.SMTPServer(tt, "127.0.0.1:"+strconv.Itoa(int(tgtPort)))
-	defer s.Close()
 
 	c := t.Conn("smtp")
 	defer c.Close()

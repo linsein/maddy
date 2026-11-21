@@ -87,6 +87,38 @@ directive0 {env:VAR}
 Parse is forgiving and incomplete variable placeholder (e.g. '{env:VAR') will
 be left as-is. Variables are expanded inside quotes too.
 
+## Configuration macros (variables)
+
+Macros let you reuse one or more configuration arguments. Declare a macro at
+the top level, before the directive that references it. If a snippet contains
+a macro reference, declare the macro before the snippet. Put `=` after the macro
+name and list its value or values after that:
+
+```
+$(mail_domains) = example.org example.net
+$(mailbox) = "Example User"
+
+some_directive $(mail_domains)
+mailbox_directive $(mailbox)
+another_directive mail/$(mailbox)/Inbox
+```
+
+When a macro reference is a complete argument, it expands to all of the
+arguments in its definition. In this example, `some_directive` receives two
+arguments: `example.org` and `example.net`. Quoting follows the normal
+configuration rules, so `mailbox_directive` receives one argument,
+`Example User`.
+
+A macro can also be embedded in a larger argument, as in
+`mail/$(mailbox)/Inbox`. In this form, the macro must have exactly one value;
+using a macro with multiple values inside another argument is an error. An
+undefined macro used as a complete argument contributes no arguments, while an
+undefined macro embedded in an argument is replaced with an empty string.
+
+Macro declarations are only allowed at the top level, and macro references
+cannot be used as directive names. Macros use `$(name)` syntax and are separate
+from the `{env:NAME}` environment-variable expansion described above.
+
 ## Snippets & imports
 
 You can reuse blocks of configuration by defining them as "snippets". Snippet
@@ -189,6 +221,24 @@ Maddy configuration uses URL-like syntax to specify network addresses.
 - `unix://file_path` – Unix domain socket. Relative paths are relative to runtime directory (`/run/maddy`).
 - `tcp://ADDRESS:PORT` – TCP/IP socket.
 - `tls://ADDRESS:PORT` – TCP/IP socket using TLS.
+- `tcp4://ADDRESS:PORT` - TCP/IP socket, only IPv4 allowed.
+- `tcp6://ADDRESS:PORT` - TCP/IP socket, only IPv6 allowed.
+- `tcp4+tls://ADDRESS:PORT` - TCP/IP socket using TLS, only IPv4 allowed.
+- `tcp6+tls://ADDRESS:PORT` - TCP/IP socket using TLS, only IPv6 allowed.
+- `unix+tls://file_path` - Unix domain socket with TLS.
+
+Additionally, when FD sharing (e.g. via systemd socket activation) is used, the
+following syntax can be used to refernce passed file descriptors:
+- `fd://3` - file descriptor #3.
+- `fdname://passed-name` - named file descriptor `passed-name`.
+
+For both `fd` and `fdname` to work, either `LISTEN_PID` environment variable
+must be defined and match current process PID or `LISTEN_PID_ANY` environment
+variable should be equal to `1`. `fdname` requires `LISTEN_FDNAMES` environment
+variable defined with a colon-separated names list. This is compatible with
+systemd socket activation protocol with `Accept=no`, maddy does not support
+systemd socket activation with `Accept=yes` where passed FDs are accepted
+connections.
 
 ## Dummy Module
 

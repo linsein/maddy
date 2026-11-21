@@ -230,7 +230,7 @@ func (endp *Endpoint) Stop() error {
 			endp.log.Error("failed to close listener", err)
 		}
 	}
-	if err := endp.serv.Close(); err != nil {
+	if err := endp.serv.Shutdown(); err != nil {
 		return err
 	}
 	endp.listenersWg.Wait()

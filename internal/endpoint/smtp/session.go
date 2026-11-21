@@ -133,7 +133,7 @@ func (s *Session) initFromConn(conn *smtp.Conn) {
 		}
 	}
 
-	if s.endp.resolver != nil && (prevRemoteAddr == nil || s.connState.RemoteAddr.String() == prevRemoteAddr.String()) {
+	if s.endp.resolver != nil && s.endp.rdnsLookup && (prevRemoteAddr == nil || s.connState.RemoteAddr.String() == prevRemoteAddr.String()) {
 		rdnsCtx, cancelRDNS := context.WithCancel(s.sessionCtx)
 		s.connState.RDNSName = future.New()
 		s.cancelRDNS = cancelRDNS
@@ -259,8 +259,9 @@ func (s *Session) AuthPlain(ctx *module.AuthContext, username, password string) 
 
 func (s *Session) startDelivery(ctx context.Context, from string, opts smtp.MailOptions) (string, error) {
 	var err error
+	connState := s.connState.DeepCopy()
 	msgMeta := &module.MsgMetadata{
-		Conn:     &s.connState,
+		Conn:     connState,
 		SMTPOpts: opts,
 	}
 	msgMeta.ID, err = module.GenerateMsgID()

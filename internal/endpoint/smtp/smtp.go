@@ -70,6 +70,7 @@ type Endpoint struct {
 	submission          bool
 	lmtp                bool
 	deferServerReject   bool
+	rdnsLookup          bool
 	maxLoggedRcptErrors int
 	maxReceived         int
 	maxHeaderBytes      int64
@@ -121,7 +122,7 @@ func (endp *Endpoint) Configure(_ []string, cfg *config.Map) error {
 	for _, addr := range endp.addrs {
 		saddr, err := config.ParseEndpoint(addr)
 		if err != nil {
-			return fmt.Errorf("%s: invalid address: %s", addr, endp.name)
+			return fmt.Errorf("%s: invalid address (%s): %w", endp.name, addr, err)
 		}
 
 		addresses = append(addresses, saddr)
@@ -271,6 +272,7 @@ func (endp *Endpoint) setConfig(cfg *config.Map) error {
 	cfg.Bool("io_debug", false, false, &ioDebug)
 	cfg.Bool("debug", true, false, &endp.log.Debug)
 	cfg.Bool("defer_sender_reject", false, true, &endp.deferServerReject)
+	cfg.Bool("rdns_lookup", false, true, &endp.rdnsLookup)
 	cfg.Int("max_logged_rcpt_errors", false, false, 5, &endp.maxLoggedRcptErrors)
 	cfg.Custom("limits", false, false, func() (interface{}, error) {
 		return limits.Empty(endp.log.Sublogger("limits")), nil

@@ -257,15 +257,9 @@ func (s *SASLAuth) CreateSASL(
 		}
 
 		return sasllogin.NewLoginServer(func(username, password string) error {
-			username, err := s.usernameForAuth(context.Background(), username)
-			if err != nil {
-				if s.ErrorMap != nil {
-					return s.ErrorMap(ErrInvalidAuthCred)
-				}
-				return err
-			}
-
-			err = s.AuthPlain((*module.AuthContext)(ctx), username, password)
+			// AuthPlain applies AuthNormalize/AuthMap itself, so avoid applying
+			// the mapping twice for the LOGIN mechanism.
+			err := s.AuthPlain((*module.AuthContext)(ctx), username, password)
 			if err != nil {
 				s.Log.Error("authentication failed", err, "username", username, "src_ip", ctx.RemoteAddr)
 				if s.ErrorMap != nil {

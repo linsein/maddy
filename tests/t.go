@@ -26,6 +26,8 @@ package tests
 import (
 	"bufio"
 	"bytes"
+	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"math/rand"
@@ -45,9 +47,11 @@ import (
 )
 
 var (
-	TestBinary  = "./maddy"
-	CoverageOut string
-	DebugLog    bool
+	TestBinary   = "./maddy"
+	CoverageOut  string
+	DebugLog     bool
+	NoFDSharing  bool
+	ReleaseBuild bool
 )
 
 type T struct {
@@ -64,6 +68,10 @@ type T struct {
 	servProc *exec.Cmd
 
 	reloadedChan chan struct{}
+
+	allowFDSharing bool
+	extraFD        []*os.File
+	fdNames        []string
 }
 
 func NewT(t *testing.T) *T {
@@ -104,6 +112,10 @@ func (t *T) Config(cfg string) {
 func (t *T) DNS(zones map[string]mockdns.Zone) {
 	t.Helper()
 
+	if zones != nil && ReleaseBuild {
+		t.Skip("DNS mocking is not available for release builds")
+	}
+
 	if zones == nil {
 		zones = map[string]mockdns.Zone{}
 	}
@@ -120,7 +132,6 @@ func (t *T) DNS(zones map[string]mockdns.Zone) {
 	if err != nil {
 		t.Fatal("Test configuration failed:", err)
 	}
-	dnsServ.Log = t
 	t.dnsServ = dnsServ
 
 	t.Cleanup(func() {
@@ -148,11 +159,46 @@ func (t *T) Port(name string) uint16 {
 		return port
 	}
 
-	// TODO: Try to bind on port to test its usability.
-	port := rand.Int31n(45536) + 20000
-	t.ports[name] = uint16(port)
-	t.portsRev[uint16(port)] = name
-	return uint16(port)
+	port := t.allocateNamedTCPPort(name)
+
+	t.ports[name] = port
+	t.portsRev[port] = name
+	return port
+}
+
+const remoteSMTPPortName = "remote_smtp"
+
+func RandomPort() uint16 {
+	return uint16(rand.Int31n(45536) + 20000)
+}
+
+// RemoteSMTPPort defines a special port named remote_smtp. It does not use
+// FD sharing and will be passed to -debug.smtpport.
+//
+// If passed value is 0, the port is randomly generated though this is not
+// recommended - instead you should start a receiver using 0 port first and
+// pass effective port to this method.
+func (t *T) RemoteSMTPPort(port uint16) uint16 {
+	if ReleaseBuild {
+		t.Skip("Remote SMTP mocking is not available for release builds")
+	}
+
+	if port == 0 {
+		port = RandomPort()
+	}
+
+	t.ports[remoteSMTPPortName] = port
+	t.portsRev[port] = remoteSMTPPortName
+
+	return port
+}
+
+// AllowFDSharing enables the use of Unix FD sharing for Port to ensure the
+// selected port number is usable without races.
+//
+// It must be called at least once before Port is used to enable FD sharing.
+func (t *T) AllowFDSharing() {
+	t.allowFDSharing = true
 }
 
 func (t *T) Env(kv string) {
@@ -210,13 +256,16 @@ func (t *T) ensureCanRun() {
 func (t *T) buildCmd(additionalArgs ...string) *exec.Cmd {
 	// Assigning 0 by default will make outbound SMTP unusable.
 	remoteSmtp := "0"
-	if port := t.ports["remote_smtp"]; port != 0 {
+	if port := t.ports[remoteSMTPPortName]; port != 0 {
 		remoteSmtp = strconv.Itoa(int(port))
 	}
 
-	args := []string{"-config", filepath.Join(t.testDir, "maddy.conf"),
-		"-debug.smtpport", remoteSmtp,
-		"-debug.dnsoverride", t.dnsServ.LocalAddr().String(),
+	args := []string{"-config", filepath.Join(t.testDir, "maddy.conf")}
+	if !ReleaseBuild {
+		args = append(args,
+			"-debug.smtpport", remoteSmtp,
+			"-debug.dnsoverride", t.dnsServ.LocalAddr().String(),
+		)
 	}
 
 	if CoverageOut != "" {
@@ -228,7 +277,12 @@ func (t *T) buildCmd(additionalArgs ...string) *exec.Cmd {
 
 	args = append(args, additionalArgs...)
 
-	cmd := exec.Command(TestBinary, args...)
+	cmd := exec.CommandContext(t.Context(), TestBinary, args...)
+
+	cmd.WaitDelay = 5 * time.Second
+	cmd.Cancel = func() error {
+		return cmd.Process.Signal(os.Interrupt)
+	}
 
 	pwd, err := os.Getwd()
 	if err != nil {
@@ -245,6 +299,7 @@ func (t *T) buildCmd(additionalArgs ...string) *exec.Cmd {
 	for name, port := range t.ports {
 		cmd.Env = append(cmd.Env, fmt.Sprintf("TEST_PORT_%s=%d", name, port))
 	}
+	t.addNamedTCPEnv(cmd)
 	cmd.Env = append(cmd.Env, t.env...)
 
 	return cmd
@@ -255,16 +310,13 @@ func (t *T) MustRunCLIGroup(args ...[]string) {
 
 	wg := sync.WaitGroup{}
 	for _, arg := range args {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-
+		wg.Go(func() {
 			_, err := t.RunCLI(arg...)
 			if err != nil {
 				t.Printf("maddy %v: %v", arg, err)
 				t.Fail()
 			}
-		}()
+		})
 	}
 	wg.Wait()
 }
@@ -365,22 +417,11 @@ func (t *T) RuntimeDir() string {
 }
 
 func (t *T) killServer() {
-	if err := t.servProc.Process.Signal(os.Interrupt); err != nil {
-		t.Log("Unable to kill the server process:", err)
-		assert.NoError(t, os.RemoveAll(t.testDir))
-		return // Return, as now it is pointless to wait for it.
-	}
+	// exec.Command will handle interrupt-wait-then-kill via WaitDelay, Cancel and test context
+	// cancellation.
 
-	go func() {
-		time.Sleep(5 * time.Second)
-		if t.servProc != nil {
-			t.Log("Killing possibly hung server process")
-			t.servProc.Process.Kill() //nolint:errcheck
-		}
-	}()
-
-	if err := t.servProc.Wait(); err != nil {
-		t.Error("The server did not stop cleanly, deadlock?")
+	if err := t.servProc.Wait(); err != nil && !errors.Is(err, context.Canceled) {
+		t.Error("Unclean server process shutdown:", err)
 	}
 
 	t.servProc = nil
@@ -396,7 +437,7 @@ func (t *T) Close() {
 }
 
 // Printf implements Logger interfaces used by some libraries.
-func (t *T) Printf(f string, a ...interface{}) {
+func (t *T) Printf(f string, a ...any) {
 	t.Logf(f, a...)
 }
 
@@ -504,4 +545,6 @@ func init() {
 	flag.StringVar(&TestBinary, "integration.executable", "./maddy", "executable to test")
 	flag.StringVar(&CoverageOut, "integration.coverprofile", "", "write coverage stats to file (requires special maddy executable)")
 	flag.BoolVar(&DebugLog, "integration.debug", false, "pass -debug to maddy executable")
+	flag.BoolVar(&NoFDSharing, "integration.no-fd-sharing", false, "do not use FD sharing to reserve test ports")
+	flag.BoolVar(&ReleaseBuild, "integration.release", false, "executable is a release build without debugflags")
 }

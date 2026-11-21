@@ -26,6 +26,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/foxcpp/go-mockdns"
 	"github.com/foxcpp/maddy/tests"
 )
 
@@ -35,8 +36,12 @@ func TestSMTPEndpoint_LargeMessage(tt *testing.T) {
 	// (Issue 389)
 
 	tt.Parallel()
+
 	t := tests.NewT(tt)
-	t.DNS(nil)
+	t.AllowFDSharing()
+	t.DNS(map[string]mockdns.Zone{
+		"100.97.109.127.in-addr.arpa.": {PTR: []string{"client.maddy.test."}},
+	})
 	t.Port("imap")
 	t.Port("smtp")
 	t.Config(`
@@ -45,14 +50,14 @@ func TestSMTPEndpoint_LargeMessage(tt *testing.T) {
 			dsn imapsql.db
 		}
 
-		imap tcp://127.0.0.1:{env:TEST_PORT_imap} {
+		imap {env:TEST_ENDPOINT_imap} {
 			tls off
 
 			auth dummy
 			storage &test_store
 		}
 
-		smtp tcp://127.0.0.1:{env:TEST_PORT_smtp} {
+		smtp {env:TEST_ENDPOINT_smtp} {
 			hostname maddy.test
 			tls off
 
@@ -124,8 +129,11 @@ func TestSMTPEndpoint_FileBuffer(tt *testing.T) {
 	run := func(tt *testing.T, bufferOpt string) {
 		tt.Parallel()
 		t := tests.NewT(tt)
+		t.AllowFDSharing()
 
-		t.DNS(nil)
+		t.DNS(map[string]mockdns.Zone{
+			"100.97.109.127.in-addr.arpa.": {PTR: []string{"client.maddy.test."}},
+		})
 		t.Port("imap")
 		t.Port("smtp")
 		t.Config(`
@@ -134,14 +142,14 @@ func TestSMTPEndpoint_FileBuffer(tt *testing.T) {
 			dsn imapsql.db
 		}
 
-		imap tcp://127.0.0.1:{env:TEST_PORT_imap} {
+		imap {env:TEST_ENDPOINT_imap} {
 			tls off
 
 			auth dummy
 			storage &test_store
 		}
 
-		smtp tcp://127.0.0.1:{env:TEST_PORT_smtp} {
+		smtp {env:TEST_ENDPOINT_smtp} {
 			hostname maddy.test
 			tls off
 			buffer ` + bufferOpt + `
@@ -213,8 +221,11 @@ func TestSMTPEndpoint_FileBuffer(tt *testing.T) {
 func TestSMTPEndpoint_Autobuffer(tt *testing.T) {
 	tt.Parallel()
 	t := tests.NewT(tt)
+	t.AllowFDSharing()
 
-	t.DNS(nil)
+	t.DNS(map[string]mockdns.Zone{
+		"100.97.109.127.in-addr.arpa.": {PTR: []string{"client.maddy.test."}},
+	})
 	t.Port("imap")
 	t.Port("smtp")
 	t.Config(`
@@ -223,14 +234,14 @@ func TestSMTPEndpoint_Autobuffer(tt *testing.T) {
 			dsn imapsql.db
 		}
 
-		imap tcp://127.0.0.1:{env:TEST_PORT_imap} {
+		imap {env:TEST_ENDPOINT_imap} {
 			tls off
 
 			auth dummy
 			storage &test_store
 		}
 
-		smtp tcp://127.0.0.1:{env:TEST_PORT_smtp} {
+		smtp {env:TEST_ENDPOINT_smtp} {
 			hostname maddy.test
 			tls off
 			buffer auto 5b
