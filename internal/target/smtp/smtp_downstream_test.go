@@ -25,10 +25,13 @@ import (
 	"os"
 	"strconv"
 	"testing"
+	"testing/synctest"
+	"time"
 
 	"github.com/emersion/go-smtp"
 	"github.com/foxcpp/maddy/framework/config"
 	"github.com/foxcpp/maddy/framework/exterrors"
+	"github.com/foxcpp/maddy/internal/limits"
 	"github.com/foxcpp/maddy/internal/testutils"
 	"github.com/stretchr/testify/require"
 )
@@ -61,7 +64,8 @@ func TestDownstreamDelivery(t *testing.T) {
 				Port:   testPort,
 			},
 		},
-		log: testutils.Logger(t, "target.smtp"),
+		log:    testutils.Logger(t, "target.smtp"),
+		limits: limits.Empty(testutils.Logger(t, "limits")),
 	}
 
 	testutils.DoTestDelivery(t, mod, "test@example.invalid", []string{"rcpt@example.invalid"})
@@ -96,6 +100,7 @@ func TestDownstreamDelivery_LMTP(t *testing.T) {
 		modName: "target.lmtp",
 		lmtp:    true,
 		log:     testutils.Logger(t, "lmtp_downstream"),
+		limits:  limits.Empty(testutils.Logger(t, "limits")),
 	}
 
 	sc := make(statusCollector)
@@ -149,6 +154,7 @@ func TestDownstreamDelivery_LMTP_ErrorCoerce(t *testing.T) {
 		modName: "target.lmtp",
 		lmtp:    true,
 		log:     testutils.Logger(t, "lmtp_downstream"),
+		limits:  limits.Empty(testutils.Logger(t, "limits")),
 	}
 
 	_, err := testutils.DoTestDeliveryErr(t, mod, "test@example.invalid", []string{"rcpt1@example.invalid", "rcpt2@example.invalid"})
@@ -184,7 +190,8 @@ func TestDownstreamDelivery_Fallback(t *testing.T) {
 				Port:   testPort,
 			},
 		},
-		log: testutils.Logger(t, "target.smtp"),
+		log:    testutils.Logger(t, "target.smtp"),
+		limits: limits.Empty(testutils.Logger(t, "limits")),
 	}
 
 	testutils.DoTestDelivery(t, mod, "test@example.invalid", []string{"rcpt@example.invalid"})
@@ -213,7 +220,8 @@ func TestDownstreamDelivery_MAILErr(t *testing.T) {
 				Port:   testPort,
 			},
 		},
-		log: testutils.Logger(t, "target.smtp"),
+		log:    testutils.Logger(t, "target.smtp"),
+		limits: limits.Empty(testutils.Logger(t, "limits")),
 	}
 
 	_, err := testutils.DoTestDeliveryErr(t, mod, "test@example.invalid", []string{"rcpt@example.invalid"})
@@ -239,6 +247,7 @@ func TestDownstreamDelivery_StartTLS(t *testing.T) {
 		tlsConfig: clientCfg.Clone(),
 		starttls:  true,
 		log:       testutils.Logger(t, "target.smtp"),
+		limits:    limits.Empty(testutils.Logger(t, "limits")),
 	}
 
 	testutils.DoTestDelivery(t, mod, "test@example.invalid", []string{"rcpt@example.invalid"})
@@ -268,6 +277,7 @@ func TestDownstreamDelivery_StartTLS_NoFallback(t *testing.T) {
 		},
 		starttls: true,
 		log:      testutils.Logger(t, "target.smtp"),
+		limits:   limits.Empty(testutils.Logger(t, "limits")),
 	}
 
 	_, err := testutils.DoTestDeliveryErr(t, mod, "test@example.invalid", []string{"rcpt@example.invalid"})

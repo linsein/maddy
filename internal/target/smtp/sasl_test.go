@@ -24,6 +24,7 @@ import (
 	"github.com/emersion/go-smtp"
 	"github.com/foxcpp/maddy/framework/config"
 	"github.com/foxcpp/maddy/framework/module"
+	"github.com/foxcpp/maddy/internal/limits"
 	"github.com/foxcpp/maddy/internal/testutils"
 	"github.com/stretchr/testify/require"
 )
@@ -57,6 +58,7 @@ func TestSASL_Plain(t *testing.T) {
 		},
 		saslFactory: testSaslFactory(t, "plain", "test", "testpass"),
 		log:         testutils.Logger(t, "target.smtp"),
+		limits:      limits.Empty(testutils.Logger(t, "limits")),
 	}
 
 	testutils.DoTestDelivery(t, mod, "test@example.invalid", []string{"rcpt@example.invalid"})
@@ -93,6 +95,7 @@ func TestSASL_Plain_AuthFail(t *testing.T) {
 		},
 		saslFactory: testSaslFactory(t, "plain", "test", "testpass"),
 		log:         testutils.Logger(t, "target.smtp"),
+		limits:      limits.Empty(testutils.Logger(t, "limits")),
 	}
 
 	_, err := testutils.DoTestDeliveryErr(t, mod, "test@example.invalid", []string{"rcpt@example.invalid"})
@@ -136,6 +139,7 @@ func TestSASL_Forward(t *testing.T) {
 		},
 		saslFactory: testSaslFactory(t, "forward"),
 		log:         testutils.Logger(t, "target.smtp"),
+		limits:      limits.Empty(testutils.Logger(t, "limits")),
 	}
 
 	testutils.DoTestDeliveryMeta(t, mod, "test@example.invalid", []string{"rcpt@example.invalid"}, &module.MsgMetadata{
@@ -171,6 +175,7 @@ func TestSASL_Forward_NoCreds(t *testing.T) {
 		},
 		saslFactory: testSaslFactory(t, "forward"),
 		log:         testutils.Logger(t, "target.smtp"),
+		limits:      limits.Empty(testutils.Logger(t, "limits")),
 	}
 
 	_, err := testutils.DoTestDeliveryErr(t, mod, "test@example.invalid", []string{"rcpt@example.invalid"})

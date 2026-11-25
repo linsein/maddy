@@ -36,14 +36,17 @@ import (
 
 	"github.com/emersion/go-message/textproto"
 	"github.com/emersion/go-smtp"
+	"github.com/foxcpp/maddy/framework/address"
 	"github.com/foxcpp/maddy/framework/buffer"
 	"github.com/foxcpp/maddy/framework/config"
+	modconfig "github.com/foxcpp/maddy/framework/config/module"
 	tls2 "github.com/foxcpp/maddy/framework/config/tls"
 	"github.com/foxcpp/maddy/framework/container"
 	"github.com/foxcpp/maddy/framework/exterrors"
 	"github.com/foxcpp/maddy/framework/log"
 	"github.com/foxcpp/maddy/framework/module"
 	"github.com/foxcpp/maddy/framework/module/modules"
+	"github.com/foxcpp/maddy/internal/limits"
 	"github.com/foxcpp/maddy/internal/smtpconn"
 	"github.com/foxcpp/maddy/internal/target"
 	"golang.org/x/net/idna"
@@ -59,6 +62,8 @@ type Downstream struct {
 	endpoints   []config.Endpoint
 	saslFactory saslClientFactory
 	tlsConfig   *tls.Config
+
+	limits *limits.Group
 
 	connectTimeout    time.Duration
 	commandTimeout    time.Duration
@@ -123,6 +128,16 @@ func (u *Downstream) Configure(inlineArgs []string, cfg *config.Map) error {
 	cfg.Custom("tls_client", true, false, func() (interface{}, error) {
 		return &tls.Config{}, nil
 	}, tls2.TLSClientBlock, &u.tlsConfig)
+	cfg.Custom("limits", false, false, func() (interface{}, error) {
+		return limits.Empty(u.log.Sublogger("limits")), nil
+	}, func(cfg *config.Map, n config.Node) (interface{}, error) {
+		var g *limits.Group
+		if err := modconfig.GroupFromNode("limits", n.Args, n, cfg.Globals, &g); err != nil {
+			return nil, err
+		}
+		return g, nil
+	}, &u.limits)
+
 	cfg.Duration("connect_timeout", false, false, 5*time.Minute, &u.connectTimeout)
 	cfg.Duration("command_timeout", false, false, 5*time.Minute, &u.commandTimeout)
 	cfg.Duration("submission_timeout", false, false, 5*time.Minute, &u.submissionTimeout)
@@ -185,6 +200,49 @@ type lmtpDelivery struct {
 
 func (u *Downstream) StartDelivery(ctx context.Context, msgMeta *module.MsgMetadata, mailFrom string) (module.Delivery, error) {
 	defer trace.StartRegion(ctx, "target.smtp/StartDelivery").End()
+
+	var (
+		ratelimitDomain string
+		err             error
+	)
+	// This will leave ratelimitDomain = "" for null return path which is fine
+	// for purposes of ratelimiting.
+	if mailFrom != "" {
+		_, ratelimitDomain, err = address.Split(mailFrom)
+		if err != nil {
+			return nil, &exterrors.SMTPError{
+				Code:         501,
+				EnhancedCode: exterrors.EnhancedCode{5, 1, 8},
+				Message:      "Malformed sender address",
+				TargetName:   u.modName,
+				Err:          err,
+			}
+		}
+	}
+
+	// Domain is already should be normalized by the message source (e.g.
+	// endpoint/smtp).
+	region := trace.StartRegion(ctx, "smtp/limits.Take")
+	addr := net.IPv4(127, 0, 0, 1)
+	if msgMeta.Conn != nil && msgMeta.Conn.RemoteAddr != nil {
+		tcpAddr, ok := msgMeta.Conn.RemoteAddr.(*net.TCPAddr)
+		if ok {
+			addr = tcpAddr.IP
+		}
+	}
+
+	if err := u.limits.TakeMsg(ctx, addr, ratelimitDomain); err != nil {
+		region.End()
+		return nil, &exterrors.SMTPError{
+			Code:         451,
+			EnhancedCode: exterrors.EnhancedCode{4, 4, 5},
+			Message:      "High load, try again later",
+			Reason:       "Global limit timeout",
+			TargetName:   u.modName,
+			Err:          err,
+		}
+	}
+	region.End()
 
 	d := &delivery{
 		u:        u,
@@ -278,8 +336,21 @@ func (d *delivery) connect(ctx context.Context) error {
 }
 
 func (d *delivery) AddRcpt(ctx context.Context, rcptTo string, opts smtp.RcptOptions) error {
-	err := d.conn.Rcpt(ctx, rcptTo, opts)
+	_, domain, err := address.Split(rcptTo)
 	if err != nil {
+		return err
+	}
+
+	region := trace.StartRegion(ctx, "smtp/limits.TakeDest")
+	if err := d.u.limits.TakeDest(ctx, domain); err != nil {
+		region.End()
+		return err
+	}
+	region.End()
+
+	err = d.conn.Rcpt(ctx, rcptTo, opts)
+	if err != nil {
+		d.u.limits.ReleaseDest(domain)
 		return d.u.moduleError(err)
 	}
 
@@ -339,10 +410,37 @@ func (d *lmtpDelivery) BodyNonAtomic(ctx context.Context, sc module.StatusCollec
 }
 
 func (d *delivery) Abort(ctx context.Context) error {
-	return d.conn.Close()
+	return d.Close()
 }
 
 func (d *delivery) Commit(ctx context.Context) error {
+	return d.Close()
+}
+
+func (d *delivery) Close() error {
+	var ratelimitDomain string
+	if d.mailFrom != "" {
+		// d.mailFrom already run split in Downstream.StartDelivery,
+		// the split error is safe to ignored here.
+		_, ratelimitDomain, _ = address.Split(d.mailFrom)
+	}
+
+	addr := net.IPv4(127, 0, 0, 1)
+	if d.msgMeta.Conn != nil && d.msgMeta.Conn.RemoteAddr != nil {
+		tcpAddr, ok := d.msgMeta.Conn.RemoteAddr.(*net.TCPAddr)
+		if ok {
+			addr = tcpAddr.IP
+		}
+	}
+
+	d.u.limits.ReleaseMsg(addr, ratelimitDomain)
+
+	for _, rcpt := range d.rcpts {
+		// In delivery.AddRcpt, run split and limits.TakeDest before
+		// appended to d.rcpts
+		_, domain, _ := address.Split(rcpt)
+		d.u.limits.ReleaseDest(domain)
+	}
 	return d.conn.Close()
 }
 
