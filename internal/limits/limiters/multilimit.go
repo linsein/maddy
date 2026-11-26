@@ -28,42 +28,23 @@ type MultiLimit struct {
 	Wrapped []L
 }
 
-func (ml *MultiLimit) Take() bool {
-	for i := 0; i < len(ml.Wrapped); i++ {
-		if !ml.Wrapped[i].Take() {
-			// Acquire failed, undo acquire for all other resources we already
-			// got.
-			for _, l := range ml.Wrapped[:i] {
-				l.Release()
-			}
-			return false
+func (ml *MultiLimit) TakeContext(ctx context.Context) (ReleaseFunc, error) {
+	var releases []ReleaseFunc
+	releaseAll := func() {
+		for _, l := range releases {
+			l()
 		}
 	}
-	return true
-}
-
-func (ml *MultiLimit) TakeContext(ctx context.Context) error {
 	for i := 0; i < len(ml.Wrapped); i++ {
-		if err := ml.Wrapped[i].TakeContext(ctx); err != nil {
+		if release, err := ml.Wrapped[i].TakeContext(ctx); err != nil {
 			// Acquire failed, undo acquire for all other resources we already
 			// got.
-			for _, l := range ml.Wrapped[:i] {
-				l.Release()
-			}
-			return err
+			releaseAll()
+			return nil, err
+		} else {
+			releases = append(releases, release)
 		}
 	}
-	return nil
-}
 
-func (ml *MultiLimit) Release() {
-	for _, l := range ml.Wrapped {
-		l.Release()
-	}
-}
-
-func (ml *MultiLimit) Close() {
-	for _, l := range ml.Wrapped {
-		l.Close()
-	}
+	return releaseAll, nil
 }

@@ -213,6 +213,7 @@ type remoteDelivery struct {
 
 	recipients  []string
 	connections map[string]*mxConn
+	releaseMsg  limits.ReleaseFunc
 
 	policies    []module.DeliveryMXAuthPolicy
 	secOverride bool
@@ -258,7 +259,8 @@ func (rt *Target) StartDelivery(ctx context.Context, msgMeta *module.MsgMetadata
 			addr = tcpAddr.IP
 		}
 	}
-	if err := rt.limits.TakeMsg(ctx, addr, ratelimitDomain); err != nil {
+	releaseMsg, err := rt.limits.TakeMsg(ctx, addr, ratelimitDomain)
+	if err != nil {
 		region.End()
 		return nil, &exterrors.SMTPError{
 			Code:         451,
@@ -279,6 +281,7 @@ func (rt *Target) StartDelivery(ctx context.Context, msgMeta *module.MsgMetadata
 		connections: map[string]*mxConn{},
 		policies:    policies,
 		secOverride: secOverride,
+		releaseMsg:  releaseMsg,
 	}, nil
 }
 
@@ -466,8 +469,10 @@ func (rd *remoteDelivery) IsPolicyBypassed() bool {
 
 func (rd *remoteDelivery) Close() error {
 	for _, conn := range rd.connections {
-		rd.rt.limits.ReleaseDest(conn.domain)
-		conn.takeDest = false
+		if conn.releaseDest != nil {
+			conn.releaseDest()
+			conn.releaseDest = nil
+		}
 		conn.transactions++
 
 		if !conn.Usable() || rd.IsPolicyBypassed() {
@@ -480,26 +485,7 @@ func (rd *remoteDelivery) Close() error {
 		}
 	}
 
-	var (
-		ratelimitDomain string
-		err             error
-	)
-	if rd.mailFrom != "" {
-		_, ratelimitDomain, err = address.Split(rd.mailFrom)
-		if err != nil {
-			return err
-		}
-	}
-
-	addr := net.IPv4(127, 0, 0, 1)
-	if rd.msgMeta.Conn != nil && rd.msgMeta.Conn.RemoteAddr != nil {
-		tcpAddr, ok := rd.msgMeta.Conn.RemoteAddr.(*net.TCPAddr)
-		if ok {
-			addr = tcpAddr.IP
-		}
-	}
-	rd.rt.limits.ReleaseMsg(addr, ratelimitDomain)
-
+	rd.releaseMsg()
 	return nil
 }
 

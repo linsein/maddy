@@ -18,7 +18,12 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 package limiters
 
-import "context"
+import (
+	"context"
+	"sync"
+
+	"golang.org/x/sync/semaphore"
+)
 
 // Semaphore is a convenience wrapper for a channel that implements
 // semaphore-kind synchronization.
@@ -26,43 +31,31 @@ import "context"
 // If the argument given to the NewSemaphore is negative or zero,
 // all methods are no-op.
 type Semaphore struct {
-	c chan struct{}
+	weighted *semaphore.Weighted
 }
 
 func NewSemaphore(max int) Semaphore {
-	return Semaphore{c: make(chan struct{}, max)}
+	s := Semaphore{weighted: nil}
+	if max > 0 {
+		s.weighted = semaphore.NewWeighted(int64(max))
+	}
+	return s
 }
 
-func (s Semaphore) Take() bool {
-	if cap(s.c) <= 0 {
-		return true
+func (s Semaphore) TakeContext(ctx context.Context) (ReleaseFunc, error) {
+	if s.weighted == nil {
+		return func() {}, nil
 	}
-	s.c <- struct{}{}
-	return true
-}
 
-func (s Semaphore) TakeContext(ctx context.Context) error {
-	if cap(s.c) <= 0 {
-		return nil
+	err := s.weighted.Acquire(ctx, 1)
+	if err != nil {
+		return nil, err
 	}
-	select {
-	case s.c <- struct{}{}:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
-	}
-}
 
-func (s Semaphore) Release() {
-	if cap(s.c) <= 0 {
-		return
-	}
-	select {
-	case <-s.c:
-	default:
-		panic("limiters: mismatched Release call")
-	}
-}
-
-func (s Semaphore) Close() {
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			s.weighted.Release(1)
+		})
+	}, nil
 }

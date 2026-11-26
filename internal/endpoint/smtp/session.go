@@ -41,6 +41,7 @@ import (
 	"github.com/foxcpp/maddy/framework/log"
 	"github.com/foxcpp/maddy/framework/module"
 	"github.com/foxcpp/maddy/internal/auth"
+	"github.com/foxcpp/maddy/internal/limits"
 )
 
 func limitReader(r io.Reader, n int64, err error) *limitedReader {
@@ -88,14 +89,15 @@ type Session struct {
 	// It is the subcontext of sessionCtx.
 	// Mutex is used to prevent Close from accessing inconsistent state when it
 	// is called asynchronously to any SMTP command.
-	msgLock     sync.Mutex
-	msgCtx      context.Context
-	msgTask     *trace.Task
-	mailFrom    string
-	opts        smtp.MailOptions
-	msgMeta     *module.MsgMetadata
-	delivery    module.Delivery
-	deliveryErr error
+	msgLock       sync.Mutex
+	msgCtx        context.Context
+	msgTask       *trace.Task
+	mailFrom      string
+	opts          smtp.MailOptions
+	msgMeta       *module.MsgMetadata
+	delivery      module.Delivery
+	deliveryErr   error
+	releaseLimits limits.ReleaseFunc
 
 	log *log.Logger
 }
@@ -186,23 +188,6 @@ func (s *Session) Reset() {
 	}
 }
 
-func (s *Session) releaseLimits() {
-	domain := ""
-	if s.mailFrom != "" {
-		var err error
-		_, domain, err = address.Split(s.mailFrom)
-		if err != nil {
-			return
-		}
-	}
-
-	addr, ok := s.msgMeta.Conn.RemoteAddr.(*net.TCPAddr)
-	if !ok {
-		addr = &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)}
-	}
-	s.endp.limits.ReleaseMsg(addr.IP, domain)
-}
-
 func (s *Session) abort(ctx context.Context) {
 	if err := s.delivery.Abort(ctx); err != nil {
 		s.endp.log.Error("delivery abort failed", err)
@@ -213,7 +198,10 @@ func (s *Session) abort(ctx context.Context) {
 }
 
 func (s *Session) cleanSession() {
-	s.releaseLimits()
+	if s.releaseLimits != nil {
+		s.releaseLimits()
+		s.releaseLimits = nil
+	}
 
 	s.mailFrom = ""
 	s.opts = smtp.MailOptions{}
@@ -315,7 +303,8 @@ func (s *Session) startDelivery(ctx context.Context, from string, opts smtp.Mail
 	if !ok {
 		remoteIP = &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)}
 	}
-	if err := s.endp.limits.TakeMsg(context.Background(), remoteIP.IP, domain); err != nil {
+	releaseMsg, err := s.endp.limits.TakeMsg(context.Background(), remoteIP.IP, domain)
+	if err != nil {
 		return "", err
 	}
 
@@ -328,7 +317,7 @@ func (s *Session) startDelivery(ctx context.Context, from string, opts smtp.Mail
 	if err != nil {
 		s.msgCtx = nil
 		s.msgTask.End()
-		s.endp.limits.ReleaseMsg(remoteIP.IP, domain)
+		releaseMsg()
 		return msgMeta.ID, err
 	}
 
@@ -337,6 +326,10 @@ func (s *Session) startDelivery(ctx context.Context, from string, opts smtp.Mail
 	s.msgMeta = msgMeta
 	s.mailFrom = cleanFrom
 	s.delivery = delivery
+	if s.releaseLimits != nil {
+		s.releaseLimits()
+	}
+	s.releaseLimits = releaseMsg
 
 	return msgMeta.ID, nil
 }
@@ -631,7 +624,7 @@ func (endp *Endpoint) wrapErr(msgId string, mangleUTF8 bool, command string, err
 		return nil
 	}
 
-	if errors.Is(err, context.DeadlineExceeded) {
+	if limits.IsErrHighLoad(err) {
 		return &smtp.SMTPError{
 			Code:         451,
 			EnhancedCode: smtp.EnhancedCode{4, 4, 5},

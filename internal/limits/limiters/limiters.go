@@ -20,16 +20,15 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 // of resources consumed by the server.
 package limiters
 
-import "context"
+import (
+	"context"
+)
+
+type ReleaseFunc func()
 
 // The L interface represents a blocking limiter that has some upper bound of
 // resource use and blocks when it is exceeded until enough resources are
 // freed.
 type L interface {
-	Take() bool
-	TakeContext(context.Context) error
-	Release()
-
-	// Close frees any resources used internally by Limiter for book-keeping.
-	Close()
+	TakeContext(context.Context) (ReleaseFunc, error)
 }

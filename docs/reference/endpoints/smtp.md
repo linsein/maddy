@@ -265,8 +265,11 @@ Supported limits:
 
 ### _scope_ rate _burst_ _period_
 
-Rate limit. Restrict the amount of messages processed in _period_ to
+Rate limit. Allow an average of _burst_ messages per _period_, with bursts of
 _burst_ messages. If period is not specified, 1 second is used.
+
+Periods longer than 1 minute are not recommended for "ip", "source", or
+"destination" scopes, which may be exceeded under high load.
 
 ### _scope_ concurrency _max_
 Concurrency limit. Restrict the amount of messages processed in parallel
@@ -276,9 +279,10 @@ For each supported limitation, _scope_ determines whether it should be applied
 for all messages ("all"), per-sender IP ("ip"), per-sender domain ("source") or
 per-recipient domain ("destination"). Having a scope other than "all" means
 that the restriction will be enforced independently for each group determined
-by scope. E.g.  "ip rate 20" means that the same IP cannot send more than 20
-messages per second. "destination concurrency 5" means that no more than 5
-messages can be sent in parallel to a single domain.
+by scope. E.g.  "ip rate 20" limits each IP to a long-term average of no more
+than 20 messages per second, with bursts of up to 20 messages at once.
+"destination concurrency 5" means that no more than 5 messages can be sent in
+parallel to a single domain.
 
 **Note**: At the moment, SMTP endpoint on its own does not support per-recipient
 limits.  They will be no-op. If you want to enforce a per-recipient restriction

@@ -22,6 +22,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -32,10 +33,9 @@ var ErrBucketSetFull = errors.New("limiters: Bucket set is full")
 // BucketSet is to apply per-resource rate limiting.
 //
 // Amount of buckets is limited to a certain value. When the size of internal
-// map is around or equal to that value, next Take call will attempt to remove
-// any stale buckets from the group. If it is not possible to do so (all
-// buckets are in active use), Take will return false. Alternatively, in some
-// rare cases, some other (undefined) waiting Take can return false.
+// map is around or equal to that value, next TakeContext call will attempt to
+// remove any stale buckets from the group. If it is not possible to do so (all
+// buckets are in active use), TakeContext will return an ErrBucketSetFull.
 //
 // A BucksetSet without a New function assigned is no-op: Take and TakeContext
 // always succeed and Release does nothing.
@@ -54,10 +54,13 @@ type BucketSet struct {
 	MaxBuckets int
 
 	mLck sync.Mutex
-	m    map[string]*struct {
-		r       L
-		lastUse time.Time
-	}
+	m    map[string]*bucketItem
+}
+
+type bucketItem struct {
+	r        L
+	refCount atomic.Int64
+	lastUse  time.Time
 }
 
 func NewBucketSet(new_ func() L, reapInterval time.Duration, maxBuckets int) *BucketSet {
@@ -65,37 +68,21 @@ func NewBucketSet(new_ func() L, reapInterval time.Duration, maxBuckets int) *Bu
 		New:          new_,
 		ReapInterval: reapInterval,
 		MaxBuckets:   maxBuckets,
-		m: map[string]*struct {
-			r       L
-			lastUse time.Time
-		}{},
+		m:            map[string]*bucketItem{},
 	}
 }
 
-func (r *BucketSet) Close() {
+func (r *BucketSet) take(key string) *bucketItem {
 	r.mLck.Lock()
 	defer r.mLck.Unlock()
+	bucket, ok := r.m[key]
 
-	for _, v := range r.m {
-		v.r.Close()
-	}
-}
-
-func (r *BucketSet) take(key string) L {
-	r.mLck.Lock()
-	defer r.mLck.Unlock()
-
-	if len(r.m) > r.MaxBuckets {
+	// Reap stale buckets when need create new bucket
+	if !ok && len(r.m) > r.MaxBuckets {
 		now := time.Now()
 		// Attempt to get rid of stale buckets.
 		for k, v := range r.m {
-			if now.Sub(v.lastUse) > r.ReapInterval {
-				// Drop the bucket, if there happen to be any waiting Take for it.
-				// It will return 'false', but this is fine for us since this
-				// whole 'reaping' process will run only when we are under a
-				// high load and dropping random requests in this case is a
-				// more or less reasonable thing to do.
-				v.r.Close()
+			if now.Sub(v.lastUse) > r.ReapInterval && v.refCount.Load() == 0 {
 				delete(r.m, k)
 			}
 		}
@@ -106,58 +93,41 @@ func (r *BucketSet) take(key string) L {
 		}
 	}
 
-	bucket, ok := r.m[key]
 	if !ok {
-		r.m[key] = &struct {
-			r       L
-			lastUse time.Time
-		}{
-			r:       r.New(),
-			lastUse: time.Now(),
+		r.m[key] = &bucketItem{
+			r:        r.New(),
+			refCount: atomic.Int64{},
+			lastUse:  time.Now(),
 		}
 		bucket = r.m[key]
 	}
 	r.m[key].lastUse = time.Now()
+	bucket.refCount.Add(1)
 
-	return bucket.r
+	return bucket
 }
 
-func (r *BucketSet) Take(key string) bool {
+func (r *BucketSet) TakeContext(ctx context.Context, key string) (ReleaseFunc, error) {
 	if r.New == nil {
-		return true
-	}
-
-	bucket := r.take(key)
-	for bucket == nil {
-		return false
-	}
-	return bucket.Take()
-}
-
-func (r *BucketSet) Release(key string) {
-	if r.New == nil {
-		return
-	}
-
-	r.mLck.Lock()
-	defer r.mLck.Unlock()
-
-	bucket, ok := r.m[key]
-	if !ok {
-		return
-	}
-	bucket.r.Release()
-}
-
-func (r *BucketSet) TakeContext(ctx context.Context, key string) error {
-	if r.New == nil {
-		return nil
+		return func() {}, nil
 	}
 
 	bucket := r.take(key)
 	if bucket == nil {
-		return ErrBucketSetFull
+		return nil, ErrBucketSetFull
 	}
 
-	return bucket.TakeContext(ctx)
+	release, err := bucket.r.TakeContext(ctx)
+	if err != nil {
+		bucket.refCount.Add(-1)
+		return nil, err
+	}
+
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			release()
+			bucket.refCount.Add(-1)
+		})
+	}, nil
 }

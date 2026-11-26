@@ -28,6 +28,7 @@ package limits
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"strconv"
@@ -49,6 +50,25 @@ type Group struct {
 	ip     *limiters.BucketSet // BucketSet of MultiLimit
 	source *limiters.BucketSet // BucketSet of MultiLimit
 	dest   *limiters.BucketSet // BucketSet of MultiLimit
+}
+
+type ReleaseFunc limiters.ReleaseFunc
+
+type ErrHighLoad struct {
+	scope     string
+	wrapedErr error
+}
+
+func (e *ErrHighLoad) Error() string {
+	return fmt.Sprintf("%s: %s", e.scope, e.wrapedErr.Error())
+}
+func (e *ErrHighLoad) Unwrap() error {
+	return e.wrapedErr
+}
+
+func IsErrHighLoad(err error) bool {
+	_, ok := errors.AsType[*ErrHighLoad](err)
+	return ok
 }
 
 func Empty(log *log.Logger) *Group {
@@ -152,6 +172,9 @@ func rateCtor(node config.Node, args []string) (func() limiters.L, error) {
 		if err != nil {
 			return nil, config.NodeErr(node, "%v", err)
 		}
+		if period <= 0 {
+			return nil, config.NodeErr(node, "except a positive period")
+		}
 		fallthrough
 	case 1:
 		var err error
@@ -183,75 +206,69 @@ func concurrencyCtor(node config.Node, args []string) (func() limiters.L, error)
 	}, nil
 }
 
-func (g *Group) TakeMsg(ctx context.Context, addr net.IP, sourceDomain string) error {
+func (g *Group) TakeMsg(ctx context.Context, addr net.IP, sourceDomain string) (ReleaseFunc, error) {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
+	var releases []limiters.ReleaseFunc
+	var releaseAll = func() {
+		g.log.DebugMsg("global ReleaseMsg")
+		for _, r := range releases {
+			r()
+		}
+		g.log.DebugMsg("global ReleaseMsg done")
+	}
+
 	g.log.DebugMsg("global TakeContext")
-	if err := g.global.TakeContext(ctx); err != nil {
-		return fmt.Errorf("TakeMsg: global: %w", err)
+	if r, err := g.global.TakeContext(ctx); err != nil {
+		return nil, &ErrHighLoad{"global", err}
+	} else {
+		releases = append(releases, r)
 	}
 	g.log.DebugMsg("global TakeContext done")
 
 	if g.ip != nil {
 		g.log.DebugMsg("ip TakeContext", "ip", addr.String())
-		if err := g.ip.TakeContext(ctx, addr.String()); err != nil {
-			g.global.Release()
-			return fmt.Errorf("TakeMsg: ip: %w", err)
+		if r, err := g.ip.TakeContext(ctx, addr.String()); err != nil {
+			releaseAll()
+			return nil, &ErrHighLoad{"ip", err}
+		} else {
+			releases = append(releases, r)
 		}
 		g.log.DebugMsg("ip TakeContext done", "ip", addr.String())
 	}
 	if g.source != nil {
 		g.log.DebugMsg("source TakeContext", "domain", sourceDomain)
-		if err := g.source.TakeContext(ctx, sourceDomain); err != nil {
-			g.global.Release()
-			if g.ip != nil {
-				g.ip.Release(addr.String())
-			}
-			return fmt.Errorf("TakeMSg: source: %w", err)
+		if r, err := g.source.TakeContext(ctx, sourceDomain); err != nil {
+			releaseAll()
+			return nil, &ErrHighLoad{"source", err}
+		} else {
+			releases = append(releases, r)
 		}
 		g.log.DebugMsg("source TakeContext done", "domain", sourceDomain)
 	}
-	return nil
+	return releaseAll, nil
 }
 
-func (g *Group) TakeDest(ctx context.Context, domain string) error {
+func (g *Group) TakeDest(ctx context.Context, domain string) (ReleaseFunc, error) {
 	if g.dest == nil {
-		return nil
+		return func() {}, nil
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
 	g.log.DebugMsg("TakeDest", "domain", domain)
-	if err := g.dest.TakeContext(ctx, domain); err != nil {
-		return fmt.Errorf("TakeDest: dest: %w", err)
+	release, err := g.dest.TakeContext(ctx, domain)
+	if err != nil {
+		return nil, &ErrHighLoad{"destination", err}
 	}
 	g.log.DebugMsg("TakeDest done", "domain", domain)
-	return nil
-}
-
-func (g *Group) ReleaseMsg(addr net.IP, sourceDomain string) {
-	g.log.DebugMsg("global ReleaseMsg")
-	g.global.Release()
-	if g.ip != nil {
-		g.log.DebugMsg("ip ReleaseMsg", "ip", addr.String())
-		g.ip.Release(addr.String())
-	}
-	if g.source != nil {
-		g.log.DebugMsg("source ReleaseMsg", "domain", sourceDomain)
-		g.source.Release(sourceDomain)
-	}
-}
-
-func (g *Group) ReleaseDest(domain string) {
-	if g.dest == nil {
-		return
-	}
-
-	g.log.DebugMsg("ReleaseDest", "domain", domain)
-	g.dest.Release(domain)
-	g.log.DebugMsg("ReleaseDest done", "domain", domain)
+	return func() {
+		g.log.DebugMsg("ReleaseDest")
+		release()
+		g.log.DebugMsg("ReleaseDest done")
+	}, nil
 }
 
 func (g *Group) Name() string {

@@ -31,6 +31,7 @@ import (
 	"github.com/foxcpp/maddy/framework/dns"
 	"github.com/foxcpp/maddy/framework/exterrors"
 	"github.com/foxcpp/maddy/framework/module"
+	"github.com/foxcpp/maddy/internal/limits"
 	"github.com/foxcpp/maddy/internal/smtpconn"
 )
 
@@ -44,8 +45,8 @@ type mxConn struct {
 	// Errors occurred previously on this connection.
 	errored bool
 
-	reuseLimit int
-	takeDest   bool
+	reuseLimit  int
+	releaseDest limits.ReleaseFunc
 
 	// Amount of times connection was used for an SMTP transaction.
 	transactions int
@@ -237,8 +238,8 @@ func (rd *remoteDelivery) attemptMX(ctx context.Context, conn *mxConn, record *n
 }
 
 func (rd *remoteDelivery) closeConn(c *mxConn) {
-	if c.takeDest {
-		rd.rt.limits.ReleaseDest(c.domain)
+	if c.releaseDest != nil {
+		c.releaseDest()
 	}
 
 	if err := c.Close(); err != nil {
@@ -302,13 +303,14 @@ func (rd *remoteDelivery) connectionForDomain(ctx context.Context, domain string
 	}
 
 	region := trace.StartRegion(ctx, "remote/limits.TakeDest")
-	if err := rd.rt.limits.TakeDest(ctx, domain); err != nil {
+	if release, err := rd.rt.limits.TakeDest(ctx, domain); err != nil {
 		region.End()
 		rd.closeConn(conn)
 		return nil, err
+	} else {
+		conn.releaseDest = release
 	}
 	region.End()
-	conn.takeDest = true
 
 	// Relaxed REQUIRETLS mode is not conforming to the specification strictly
 	// but allows to start deploying client support for REQUIRETLS without the
